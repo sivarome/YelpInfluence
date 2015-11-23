@@ -1,0 +1,326 @@
+---
+title: "Does Yelp reviews influence user ratings?"
+author: "sivarome"
+date: "Sunday, November 22, 2015"
+output: pdf_document
+---
+
+## Title  
+
+Does Yelp reviews influence user ratings?
+
+## Introduction
+
+Yelp is a popular website where users share their feedback about their experience with any business. There are thousands of businesses that are currently being rated by millions of customers. Yelp has become a key influencer for customers.  
+
+Imagine you visited a restaurant and wants to rate their business. When you login to Yelp you see your friends' reviews. Would you be influenced by your friends' reviews?  
+
+In this analysis we use Yelp data to answer following question:  
+- While rating a business on Yelp, does the user gets influenced by their friends' reviews.  
+
+Yelp dataset contains business, user, review, checkin and tip data. For this analysis we use only business, review and user data.  
+
+#### Environment  
+
+The analysis is performed on R programming language on Windows PC. This report is generated using the knitr package in RStudio.  
+
+ - OS: Windows 8.1 64-bit  
+ - R version: 3.1.3  
+ - RStudio version: 0.98.1103  
+
+```{r load libraries, eval=TRUE, echo=FALSE, error=FALSE, warning=FALSE, message=FALSE}
+
+library(jsonlite)
+library(data.table)
+library(dplyr)
+library(caret)
+library(stringr)
+library(plyr)
+
+library(rattle)
+library(rpart)
+library(randomForest)
+```
+
+```{r sentiment dictionaries, eval=FALSE, echo=FALSE}
+pos.words <- scan('pos_sentiment.txt', what='character', comment.char=';')
+neg.words <- scan('neg_sentiment.txt', what='character', comment.char=';')
+```
+
+The random seed value is set to "123".  
+
+```{r seed, message=FALSE, warning=FALSE}
+set.seed(123)
+```
+
+## Methods  
+
+### Loading the data  
+
+Source data is loaded into data tables. For this analysis user, business and review data are used.  
+
+```{r download files, eval=FALSE, echo=TRUE}
+business_data <- stream_in(file("yelp_academic_dataset_business.json"))
+user_data <- stream_in(file("yelp_academic_dataset_user.json"))
+review_data <- stream_in(file("yelp_academic_dataset_review.json"))
+```
+
+#### Subsetting the data  
+
+Only the businesses in Pennsylvania state are used for this analysis.  
+
+```{r subset PA data, eval=FALSE, echo=TRUE}
+#Select the businesses in Pennsylvania State (PA)
+business_ids <- business_data[which(business_data$state=="PA"), business_id]
+
+# get sample reviews, tips & checkin for the selected businesses
+business_sample <- business_data[business_id %in% business_ids]
+review_sample <- review_data[business_id %in% business_ids]
+
+# get sample users for the seleted business
+user_ids <- unique(review_sample$user_id)
+user_sample <- user_data[user_id %in% user_ids]
+```
+
+### Cleaning the data  
+
+The puspose of this report is to see if there is any influence of friends' reviews. So it is important to identify the sentiment of each review. Sentiment analysis is applied on the review text to identify the total positive and negative words in the review. The difference between positive and negative counts will give the sentiment score for the review which will be later used in the prediction model.  
+
+Date filter is applied to systematically include only the past reviews (for example, if a user is rating a business on 01-Jan-2015, they cannot see the review posted on 05-Jan-2015. such reviews will be ignored).  
+
+```{r load saved data, eval=TRUE, echo=FALSE, cache=TRUE}
+clean_data<-readRDS(file="clean_data.RDS")
+```
+
+```{r clean data, eval=FALSE, echo=FALSE}
+##saveRDS(review_processed, file="review_processed.RDS")
+#review_processed<-readRDS(file="review_processed.RDS")
+##saveRDS(processed_data, file="processed_data.RDS")
+#processed_data<-readRDS(file="processed_data.RDS")
+##saveRDS(clean_data, file="clean_data.RDS")
+#clean_data<-readRDS(file="clean_data.RDS")
+
+# clean up the reviews by removing punctuations, spl. characters and numbers
+review_sample$text = gsub('[[:punct:]]', '', review_sample$text)
+review_sample$text = gsub('[[:cntrl:]]', '', review_sample$text)
+review_sample$text = gsub('\\d+', '', review_sample$text)
+#convert the text to lower case
+review_sample$text = tolower(review_sample$text)
+
+nReviews=nrow(review_sample)
+review_scores <- data.frame()
+for (i in 1:nReviews)
+  {
+  
+  word.list = str_split(review_sample[i,]$text, '\\s+')
+  words = unlist(word.list)
+  
+  pos.matches = match(words, pos.words)
+  neg.matches = match(words, neg.words)
+  pos.matches = !is.na(pos.matches)
+  neg.matches = !is.na(neg.matches)
+  
+  score = sum(pos.matches) - sum(neg.matches)
+  
+  review_scores <- rbind(review_scores, data.frame(score=score, 
+                                                   pos=sum(pos.matches), 
+                                                   neg=sum(neg.matches)
+                                                   )
+                         )
+  
+  }
+
+review_processed <- cbind(review_sample, review_scores)
+
+processed_data <- data.frame()
+
+for (i in 1:nReviews)
+  {
+  in_review <- review_sample[i,]
+  in_business_id <- in_review$business_id
+  in_date<- in_review$date
+  in_user_id <- in_review$user_id
+  friends <- user_sample[user_id==in_user_id,.(friends)]
+  
+  friend_review <- review_processed[user_id %in% unlist(friends) 
+                                    & date < in_date 
+                                    & business_id == in_business_id]
+  
+  if(nrow(friend_review)>0)
+    {
+    
+    friend_data <- user_sample[user_id %in% friend_review$user_id,
+                               .(nFriends=length(unlist(friends)), 
+                                 muFriendFans=mean(fans), 
+                                 muFriendsFunny=mean(votes.funny),
+                                 muFriendsUseful=mean(votes.useful),
+                                 muFriendsCool=mean(votes.cool)
+                                 )
+                               ]
+    score_data <- friend_review[,
+                                .(score=sum(score),
+                                  muscore=mean(score), 
+                                  pos=sum(pos),
+                                  neg=sum(neg),
+                                  mupos=mean(pos), 
+                                  muneg=mean(neg),
+                                  muStars=mean(stars)
+                                  )
+                                ]
+    
+    }
+  else 
+    {
+      friend_data <- data.frame(nFriends=NA, 
+                                muFriendFans=NA,
+                                muFriendsFunny=NA,
+                                muFriendsUseful=NA,
+                                muFriendsCool=NA
+                                )
+      
+      score_data <- data.frame(score=NA, muscore=NA, 
+                               pos=NA,neg=NA, 
+                               mupos=NA, muneg=NA,
+                               muStars=NA)
+      
+      }
+  
+  rec <- cbind(friend_data, score_data, stars=in_review$stars)
+  
+  processed_data <- rbind(processed_data, rec)
+  
+  }
+
+#processed_data$stars <- pol(processed_data$stars)
+
+clean_data <- data.frame(processed_data[complete.cases(processed_data)])
+
+n <- nrow(clean_data)
+for (i in 1:n)
+  {
+  str <- clean_data[i,]$stars
+  if (round(str) < 2) {clean_data[i,]$stars = 1}
+  else if (round(str) > 3) {clean_data[i,]$stars = 5}
+  else {clean_data[i,]$stars = 3}
+  }
+for (i in 1:n)
+  {
+  str <- clean_data[i,]$muStars
+  if (round(str) < 2) {clean_data[i,]$muStars = 1}
+  else if (round(str) > 3) {clean_data[i,]$muStars = 5}
+  else {clean_data[i,]$muStars = 3}
+  }
+#clean_data <- data.frame(processed_data[complete.cases(processed_data)])
+clean_data$stars <- factor(clean_data$stars)
+
+```
+
+Here is the final structure of the cleaned data. **stars** is the outcome variable, which represents the actual rating given by the user. Other fields are calculated using the aggregated sentiment scores of the user's friends.  
+
+```{r show clean data, eval=TRUE, echo=TRUE}
+str(clean_data)
+```
+
+### Exploratory analysis  
+
+Here is a pairs plot that shows the correlation of User rating with their friends' reviews (sentiment scores).   
+
+```{r exploratory analysis, echo=TRUE, eval=TRUE, fig.height=3}
+plotData <-select(clean_data,c(score, pos, neg, muStars, stars))
+featurePlot(x=plotData, y=plotData$stars, plot="pairs")
+```
+
+These seems to be some correlation between the sentiment scores and the user rating (stars).  
+
+### Prediction model  
+
+Classification models are used for predicting the user rating based on the aggregated sentiment score of their friends. **rpart** (Decision Tree) and **rf** (Random Forest) algorithms are tested as prediction models. The most accurate model is selected based on the results of these tests.  
+
+For this analysis the ratings are classified as 1-negative, 3-neutral and 5-positive to show the polarity of the review. These categories are used as prediction outcomes.  
+
+## Results  
+
+### Partition  
+
+The data is partitioned into training and test datasets with 60:40 ratio based on the outcome variable, stars.  
+
+```{r create partitions, message=FALSE}
+set.seed(123)
+inTrain <- createDataPartition(clean_data$stars, p=0.6, list=FALSE)
+
+trainData <- clean_data[inTrain,]
+testData <- clean_data[-inTrain,]
+```
+
+#### Decision Tree Algorithm  
+
+First we apply Decision Tree algorithm to fit the model using the training data set.  
+
+```{r rpart algorithm}
+f <- as.formula("stars ~ nFriends + muStars + score + muscore + pos + neg")
+
+rpartFit <- train(f, data=trainData, method="rpart",
+                  preProcess=c("center", "scale"), 
+                  trControl=trainControl(method="cv", number=5))
+```
+
+We use this model to predict the training and test data sets and compare the actual values using the confusion matrix to get the accuracy.  
+
+```{r predict rpart}
+rpart_predictions <- predict(rpartFit, newdata=trainData)
+rpart_cMatrix_train <- confusionMatrix(rpart_predictions, trainData$stars)
+rpart_cMatrix_train$overall[1]
+
+rpart_predictions <- predict(rpartFit, newdata=testData)
+rpart_cMatrix <- confusionMatrix(rpart_predictions, testData$stars)
+rpart_cMatrix$overall[1]
+```
+
+This model gives an accuracy of `r rpart_cMatrix$overall[1]` on the test data.    
+
+#### Random Forest Algorithm (rf)  
+
+Next model is based on Random Forest algrithm. Below code applies Random Forest algorithm to fit the model using the training data set.  
+
+```{r rf algorithm, cache=TRUE}
+set.seed(123)
+f <- as.formula("stars ~ nFriends + muStars + score + muscore + pos + neg")
+
+fitControl <- trainControl(method = "none")
+tgrid <- expand.grid(mtry=c(3)) 
+rfFit <- train (f, data = trainData, method = "rf", 
+                trControl = fitControl, 
+                tuneGrid = tgrid)
+```
+
+We use this model to predict the training and test data sets and compare the actual values using the confusion matrix to get the accuracy.  
+
+```{r predict random forest}
+rf_predictions <- predict(rfFit, newdata=trainData)
+rf_cMatrix_train <- confusionMatrix(rf_predictions, trainData$stars)
+rf_cMatrix_train$overall[1]
+
+rf_predictions <- predict(rfFit, newdata=testData)
+rf_cMatrix <- confusionMatrix(rf_predictions, testData$stars)
+rf_cMatrix$overall[1]
+```
+
+This model gives an accuracy of `r rf_cMatrix$overall[1]` on the test dataset.  
+
+## Discussion  
+
+Decision tree and Random forest algorithms both resulted in similar accuracy rate with the test data. But for the training dataset, Random forest has much better accuracy. Hence Random forest model is chosen as the better model.  
+
+The prediction model resulted in `r round(rf_cMatrix$overall[1]*100)` percent accuracy. Although this is not a significant fraction, we can see a considerable correlation between user rating and their friends' reviews.  
+
+The correlation is strong for positive reviews compared to the negative reviews. So we can interpret that the positive friend reviews may influence user ratings strongly, however the negative reviews may have less influence.  
+
+Following are the confusion matrices for the predictions on training and test datasets. We can observe that the positive reviews have more influence than the negarive reviews.  
+
+```{r print cm rf}
+# Confusion matrix for training data
+rf_cMatrix_train$table
+# Confusion matrix for test data
+rf_cMatrix$table
+```
+
